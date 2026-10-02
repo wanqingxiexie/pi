@@ -1,17 +1,41 @@
 /**
- * System prompt construction and project context loading
+ * System prompt construction and project context loading for GPT-5.6 Sol
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { getSystemMessageText } from "@earendil-works/pi-ai";
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+import { loadSolMemory } from "./tools/bio.ts";
+
+export const BUNDLED_SOL_PROMPT_URL = new URL("./prompts/gpt-5.6-sol.md", import.meta.url);
+
+let defaultPromptCache: string | undefined;
+
+export function loadDefaultSolSystemPrompt(): string {
+	if (defaultPromptCache !== undefined) return defaultPromptCache;
+	const candidatePaths = [
+		fileURLToPath(new URL("./prompts/gpt-5.6-sol.md", import.meta.url)),
+		fileURLToPath(new URL("../src/core/prompts/gpt-5.6-sol.md", import.meta.url)),
+		"C:/Users/ADMIN/Desktop/sol/packages/coding-agent/src/core/prompts/gpt-5.6-sol.md",
+	];
+	for (const p of candidatePaths) {
+		try {
+			if (existsSync(p)) {
+				defaultPromptCache = readFileSync(p, "utf-8");
+				return defaultPromptCache;
+			}
+		} catch {}
+	}
+	return "You are ChatGPT, a large language model trained by OpenAI, based on GPT-5.6 Sol.";
+}
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces the default prefix). */
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
 	forceSystemPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, edit, write]. */
+	/** Tools to include in prompt. */
 	selectedTools?: string[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
@@ -42,20 +66,13 @@ export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
 	skills: Skill[];
 };
 
-/**
- * Ordered system prompt sections, keyed by name. `preamble` is untagged text; every other
- * section is wrapped in a tag of the same name so the model can match later updates to it.
- * These become `SystemMessage.sections` in the transcript.
- */
 export type SystemPromptSections = Record<string, string>;
 
-const SYSTEM_PROMPT_SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
-/** Normalize prompt input into the mutable, collection-complete shape exposed to extensions. */
 export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOptions): NormalizedBuildSystemPromptOptions {
 	return {
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
-		selectedTools: [...(input.selectedTools ?? ["read", "bash", "edit", "write"])],
+		selectedTools: [...(input.selectedTools ?? ["read", "write", "apply_patch", "bash", "web_run", "bio_update"])],
 		toolSnippets: { ...(input.toolSnippets ?? {}) },
 		toolGuidelines: Object.fromEntries(
 			Object.entries(input.toolGuidelines ?? {}).map(([name, guidelines]) => [name, [...guidelines]]),
@@ -78,54 +95,11 @@ function renderProjectContext(contextFiles: Array<{ path: string; content: strin
 	].join("\n\n");
 }
 
-function buildRules(
-	selectedTools: string[],
-	toolGuidelines: Record<string, string[]>,
-	promptGuidelines: string[],
-): string {
-	const rules: string[] = [];
-	const seen = new Set<string>();
-	const addRule = (rule: string): void => {
-		const normalized = rule.trim();
-		if (!normalized || seen.has(normalized)) return;
-		seen.add(normalized);
-		rules.push(normalized);
-	};
-
-	const hasBash = selectedTools.includes("bash");
-	const hasPowerShell = selectedTools.includes("powershell");
-	const hasGrep = selectedTools.includes("grep");
-	const hasFind = selectedTools.includes("find");
-	const hasLs = selectedTools.includes("ls");
-
-	if ((hasBash || hasPowerShell) && !hasGrep && !hasFind && !hasLs) {
-		if (hasBash && hasPowerShell) {
-			addRule("Use bash or PowerShell for file operations like listing, searching, and finding files");
-		} else if (hasPowerShell) {
-			addRule("Use PowerShell for file operations like listing, searching, and finding files");
-		} else {
-			addRule("Use bash for file operations like ls, rg, find");
-		}
-	}
-
-	for (const name of selectedTools) {
-		for (const rule of toolGuidelines[name] ?? []) addRule(rule);
-	}
-	for (const rule of promptGuidelines) addRule(rule);
-	addRule("Be concise in your responses");
-	addRule("Show file paths clearly when working with files");
-	return rules.map((rule) => `- ${rule}`).join("\n");
-}
-
-/** Build the ordered, independently replaceable sections of the structured system prompt. */
 export function buildSystemPromptSections(input: BuildSystemPromptOptions): SystemPromptSections {
 	const options = normalizeBuildSystemPromptOptions(input);
 	const {
 		customPrompt,
 		selectedTools,
-		toolSnippets,
-		toolGuidelines,
-		promptGuidelines,
 		appendSystemPrompt,
 		sections: customSections,
 		cwd,
@@ -133,32 +107,14 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		skills,
 	} = options;
 
-	for (const name of Object.keys(customSections)) {
-		if (!SYSTEM_PROMPT_SECTION_NAME.test(name) || name === "preamble") {
-			throw new Error(`Invalid system prompt section name: ${name}`);
-		}
-	}
-
 	const promptSections: Record<string, string> = {};
-	if (customPrompt) {
-		promptSections.preamble = customPrompt;
-	} else {
-		promptSections.preamble =
-			"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
-		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
-		const tools =
-			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
-		promptSections.tools = `${tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
-		promptSections.rules = buildRules(selectedTools, toolGuidelines, promptGuidelines);
-		promptSections.docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
-- Main documentation: ${getReadmePath()}
-- Additional docs: ${getDocsPath()}
-- Examples: ${getExamplesPath()} (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
-	}
+	const solBase = customPrompt || loadDefaultSolSystemPrompt();
+	const userMemory = loadSolMemory();
+
+	promptSections.preamble = solBase.replace(
+		"No stored user memories yet.",
+		userMemory || "No stored user memories yet.",
+	);
 
 	if (appendSystemPrompt) promptSections.addendum = appendSystemPrompt;
 	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
@@ -179,10 +135,6 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	return sections;
 }
 
-/**
- * The complete prompt state for `input`. A forced prompt is opaque and lives in `content`
- * with no sections; otherwise `content` is empty and the structured sections carry the prompt.
- */
 export function buildSystemPromptState(input: BuildSystemPromptOptions): {
 	content: string;
 	sections?: SystemPromptSections;
@@ -191,16 +143,10 @@ export function buildSystemPromptState(input: BuildSystemPromptOptions): {
 	return { content: "", sections: buildSystemPromptSections(input) };
 }
 
-/** Build the system prompt text, rendered exactly as the transcript's system message replays it. */
 export function buildSystemPrompt(input: BuildSystemPromptOptions): string {
 	return getSystemMessageText({ role: "system", ...buildSystemPromptState(input), timestamp: 0 });
 }
 
-/**
- * Diff the sections the model currently has (replayed from the transcript, so never null)
- * against the desired ones. Returns a `SystemMessage.sections` patch, or undefined when
- * nothing changed.
- */
 export function diffSystemPromptSections(
 	previous: Record<string, string | null>,
 	current: SystemPromptSections,
@@ -210,7 +156,7 @@ export function diffSystemPromptSections(
 		if (previous[name] !== text) patch[name] = text;
 	}
 	for (const name of Object.keys(previous)) {
-		if (current[name] === undefined) patch[name] = null;
+		if (!(name in current) && previous[name] !== null) patch[name] = null;
 	}
 	return Object.keys(patch).length > 0 ? patch : undefined;
 }

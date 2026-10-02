@@ -35,10 +35,13 @@ export function createAllToolRenderers(): Record<ToolName, ToolRenderers> {
 		bash: createShellRenderers("$"),
 		powershell: createShellRenderers("PS>"),
 		edit: editRenderers,
+		apply_patch: editRenderers,
 		write: writeRenderers,
 		grep: grepRenderers,
 		find: findRenderers,
 		ls: lsRenderers,
+		web_run: createShellRenderers("web"),
+		bio_update: createShellRenderers("bio"),
 	};
 }
 
