@@ -14,13 +14,19 @@ let defaultPromptCache: string | undefined;
 
 export function loadDefaultSolSystemPrompt(): string {
 	if (defaultPromptCache !== undefined) return defaultPromptCache;
-	try {
-		const bundledPath = fileURLToPath(BUNDLED_SOL_PROMPT_URL);
-		if (existsSync(bundledPath)) {
-			defaultPromptCache = readFileSync(bundledPath, "utf-8");
-			return defaultPromptCache;
-		}
-	} catch {}
+	const candidatePaths = [
+		fileURLToPath(new URL("./prompts/gpt-5.6-sol.md", import.meta.url)),
+		fileURLToPath(new URL("../src/core/prompts/gpt-5.6-sol.md", import.meta.url)),
+		"C:/Users/ADMIN/Desktop/sol/packages/coding-agent/src/core/prompts/gpt-5.6-sol.md",
+	];
+	for (const p of candidatePaths) {
+		try {
+			if (existsSync(p)) {
+				defaultPromptCache = readFileSync(p, "utf-8");
+				return defaultPromptCache;
+			}
+		} catch {}
+	}
 	return "You are ChatGPT, a large language model trained by OpenAI, based on GPT-5.6 Sol.";
 }
 
